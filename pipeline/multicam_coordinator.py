@@ -185,6 +185,10 @@ class MultiCameraCoordinator:
 
         print(f"[Coordinator] Multi-camera pipeline stopped for session: {session_id}", flush=True)
 
+        # The Colab notebook copies the run folder itself. Skip rclone there.
+        if os.environ.get("OMNIREID_SKIP_RCLONE") == "1":
+            return
+
         # Automatically upload to Google Drive using rclone in the background
         if hasattr(self, 'run_folder') and self.run_folder:
             import subprocess
