@@ -1,0 +1,38 @@
+# Environments
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Weights & Models
+*.pt
+*.pth
+*.onnx
+*.weights
+weights/
+models/
+
+# Videos
+*.mp4
+*.avi
+*.mkv
+*.webm
+*.mov
+1min_recordings/
+recordings/
+test_1/
+test_1_processed/
+
+# Images
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+
+# Logs and Data
+logs/
+*.log
+*.csv
+fast_experiment_results/

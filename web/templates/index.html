@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OmniReID - 6-Camera Live Re-ID System</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Header Bar -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>OmniReID <span>v2</span></h1>
+          <p>6-Camera Real-Time Person Re-Identification & Cross-Camera Fusion</p>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div class="status-pill" id="systemStatePill">
+          <span class="status-dot"></span>
+          <span id="systemStateText">IDLE</span>
+        </div>
+        <div class="session-badge" id="sessionBadgeContainer" style="display: none;">
+          <span class="label">SESSION:</span>
+          <span class="session-id" id="sessionIdText">-</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button class="btn btn-secondary" id="btnProbe" onclick="probeCameras()">
+          <span class="btn-icon">🔍</span> Test Cameras
+        </button>
+        <button class="btn btn-primary" id="btnStart" onclick="startAnalysis()" disabled>
+          <span class="btn-icon">▶</span> Start Analysis
+        </button>
+        <button class="btn btn-danger" id="btnStop" onclick="stopAnalysis()" disabled>
+          <span class="btn-icon">⏹</span> Stop Analysis
+        </button>
+        <button class="btn btn-icon-only" onclick="openConfigModal()" title="Camera Configuration">
+          ⚙
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="dashboard-body">
+      <!-- 6-Camera Live Video Grid -->
+      <section class="video-grid-container">
+        <div class="grid-header">
+          <h2>Live Stream Feeds</h2>
+          <span class="stream-note">Segmented Foreground Re-ID • YOLO11-Seg • ResNet50-IBN BNNeck</span>
+        </div>
+        <div class="video-grid" id="videoGrid">
+          {% for cam_id, cfg in cameras.items() %}
+          <div class="camera-card {% if not cfg.enabled %}standby-card{% endif %}" id="card_{{ cam_id }}">
+            <div class="card-video-wrapper">
+              <img class="video-feed" id="stream_{{ cam_id }}" alt="{{ cfg.name }}" data-cam-id="{{ cam_id }}" data-enabled="{{ 'true' if cfg.enabled else 'false' }}">
+              <div class="camera-placeholder" id="placeholder_{{ cam_id }}">
+                <div class="placeholder-icon">{% if cfg.enabled %}📹{% else %}⏸{% endif %}</div>
+                <div class="placeholder-label">{% if cfg.enabled %}Feed Inactive (Idle){% else %}Standby / Empty Slot{% endif %}</div>
+                <div class="placeholder-hint">{% if cfg.enabled %}Click "Test Cameras" to probe{% else %}Add RTSP URL in config.py{% endif %}</div>
+              </div>
+              <div class="camera-badge-overlay">
+                <span class="cam-name">{{ cfg.name }}</span>
+                <span class="fps-tag" id="fps_{{ cam_id }}">0.0 FPS</span>
+              </div>
+            </div>
+            <div class="card-footer">
+              <span class="status-indicator {% if not cfg.enabled %}standby{% endif %}" id="stat_{{ cam_id }}">{% if cfg.enabled %}OFFLINE{% else %}STANDBY{% endif %}</span>
+              <span class="cam-res" id="res_{{ cam_id }}">--</span>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+
+      <!-- Right Sidebar Panels -->
+      <aside class="sidebar-container">
+        <!-- Discovered Persons Gallery -->
+        <div class="panel-card gallery-panel">
+          <div class="panel-header">
+            <h3>Discovered Targets (<span id="personCount">0</span>)</h3>
+            <span class="panel-subtitle">Live In-Camera Exclusivity</span>
+          </div>
+          <div class="gallery-list" id="galleryList">
+            <div class="empty-state">No targets discovered yet. Start analysis to begin live enrollment.</div>
+          </div>
+        </div>
+
+        <!-- Live Activity & Merge Audit Log -->
+        <div class="panel-card log-panel">
+          <div class="panel-header">
+            <h3>Live Activity & Merge Log</h3>
+            <span class="panel-subtitle">Dynamic Online Reconciliation</span>
+          </div>
+          <div class="event-feed" id="eventFeed">
+            <div class="empty-state">Event stream ready.</div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Camera Config Modal -->
+    <div class="modal-overlay" id="configModal" style="display: none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Camera RTSP Stream Configuration</h3>
+          <button class="modal-close" onclick="closeConfigModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">Configure RTSP stream URLs for all 6 cameras. Changes take effect on next probe/start without restarting the server.</p>
+          <div class="config-table">
+            {% for cam_id, cfg in cameras.items() %}
+            <div class="config-row">
+              <label>{{ cfg.name }} ({{ cam_id }})</label>
+              <input type="text" id="cfg_input_{{ cam_id }}" value="{{ cfg.rtsp }}" placeholder="rtsp://admin:password@ip:554/stream">
+              <button class="btn btn-sm btn-secondary" onclick="saveCameraUrl('{{ cam_id }}')">Save</button>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeConfigModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

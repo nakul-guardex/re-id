@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Re-ID Local Video Viewer</title>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #1e293b;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            color: #38bdf8;
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        input[type="file"] {
+            background: #334155;
+            padding: 10px;
+            border-radius: 6px;
+            color: white;
+            cursor: pointer;
+        }
+        button {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #2563eb;
+        }
+        button:disabled {
+            background-color: #475569;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+            gap: 20px;
+        }
+        .video-card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 15px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+        .video-card h3 {
+            margin: 0 0 12px 0;
+            font-size: 16px;
+            color: #cbd5e1;
+            text-align: center;
+        }
+        video {
+            width: 100%;
+            border-radius: 8px;
+            background: #000;
+            aspect-ratio: 16 / 9;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Multi-Camera Re-ID Viewer</h1>
+        <div class="controls">
+            <input type="file" id="filePicker" multiple accept="video/mp4,video/webm" title="Select Video files">
+            <button id="btnPlay" disabled onclick="playAll()">▶ Play All</button>
+            <button id="btnPause" disabled onclick="pauseAll()">⏸ Pause All</button>
+            <button id="btnSync" disabled onclick="syncTimeline()">⏮ Sync to Start</button>
+        </div>
+    </div>
+
+    <div class="grid" id="videoGrid">
+        <!-- Videos will be injected here -->
+    </div>
+
+    <script>
+        const filePicker = document.getElementById('filePicker');
+        const videoGrid = document.getElementById('videoGrid');
+        const btnPlay = document.getElementById('btnPlay');
+        const btnPause = document.getElementById('btnPause');
+        const btnSync = document.getElementById('btnSync');
+        
+        let videos = [];
+
+        filePicker.addEventListener('change', (event) => {
+            const files = Array.from(event.target.files);
+            if (files.length === 0) return;
+            
+            // Sort files alphabetically so cameras are in order
+            files.sort((a, b) => a.name.localeCompare(b.name));
+            
+            videoGrid.innerHTML = '';
+            videos = [];
+            
+            // Enable buttons
+            btnPlay.disabled = false;
+            btnPause.disabled = false;
+            btnSync.disabled = false;
+
+            files.forEach(file => {
+                const url = URL.createObjectURL(file);
+                
+                const card = document.createElement('div');
+                card.className = 'video-card';
+                
+                // Extract camera name (e.g. "annotated_office_1_12345.webm" -> "office 1")
+                let displayName = file.name;
+                const match = file.name.match(/annotated_(.*)_\d+\.(mp4|webm)/);
+                if (match) {
+                    displayName = match[1].replace('_', ' ').toUpperCase();
+                }
+                
+                const title = document.createElement('h3');
+                title.textContent = displayName;
+                
+                const video = document.createElement('video');
+                video.src = url;
+                video.controls = true;
+                video.muted = true; // Required for reliable browser playback
+                
+                card.appendChild(title);
+                card.appendChild(video);
+                videoGrid.appendChild(card);
+                videos.push(video);
+            });
+        });
+
+        function playAll() {
+            videos.forEach(v => v.play());
+        }
+
+        function pauseAll() {
+            videos.forEach(v => v.pause());
+        }
+
+        function syncTimeline() {
+            videos.forEach(v => v.currentTime = 0);
+        }
+    </script>
+</body>
+</html>
