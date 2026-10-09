@@ -132,6 +132,25 @@ class Tracklet:
             return True
         return False
 
+    def observe_confirmed_similarity(
+        self,
+        sim: float,
+        ema_alpha: float,
+        threshold: float,
+        release_n: int,
+    ) -> bool:
+        """Smooth the live cosine. Returns True when the smoothed score has stayed weak long enough to release."""
+        prev = self.similarity_score
+        if prev <= 0.0:
+            self.similarity_score = float(sim)
+        else:
+            self.similarity_score = (1.0 - ema_alpha) * prev + ema_alpha * float(sim)
+        if self.similarity_score < threshold:
+            self.consecutive_weak += 1
+        else:
+            self.consecutive_weak = 0
+        return self.consecutive_weak >= release_n
+
     def get_prototype_embedding(self) -> Optional[np.ndarray]:
         """Returns the mean L2-normalized embedding across accumulated samples."""
         if not self.samples:

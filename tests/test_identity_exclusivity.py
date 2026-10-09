@@ -68,6 +68,57 @@ def test_same_frame_similar_people_are_not_collapsed():
     assert out[1][0] != out[2][0]
 
 
+def test_office_keeps_best_cosine_and_rejects_a_close_second():
+    mgr = _mgr()
+    person = _emb(11)
+    other = _emb(12)
+    mgr.match_camera_tracks(
+        "office_balcony",
+        [(1, person, np.zeros(4), None)],
+        1.0,
+        is_enrollment_cam=True,
+    )
+    mgr.match_camera_tracks(
+        "office_balcony",
+        [(2, other, np.zeros(4), None)],
+        1.1,
+        is_enrollment_cam=True,
+    )
+    query = person * 0.92 + other * 0.4
+    query = query / np.linalg.norm(query)
+    out = mgr.match_camera_tracks(
+        "office_1",
+        [(9, query, np.zeros(4), None)],
+        2.0,
+        is_enrollment_cam=False,
+    )
+    assert out == {}
+
+
+def test_same_frame_conflict_gives_the_id_to_the_higher_cosine():
+    mgr = _mgr()
+    person = _emb(21)
+    mgr.match_camera_tracks(
+        "office_balcony",
+        [(1, person, np.zeros(4), None)],
+        1.0,
+        is_enrollment_cam=True,
+    )
+    gid = next(iter(mgr.identities))
+    strong = person.copy()
+    weak = person * 0.9 + _emb(22) * 0.2
+    weak = weak / np.linalg.norm(weak)
+    out = mgr.match_camera_tracks(
+        "office_1",
+        [(3, weak, np.zeros(4), None), (4, strong, np.zeros(4), None)],
+        2.0,
+        is_enrollment_cam=False,
+    )
+    assert out[4][0] == gid
+    assert 3 not in out
+    assert len(mgr.identities) == 1
+
+
 def test_office_camera_does_not_mint_ids():
     mgr = _mgr()
     out = mgr.match_camera_tracks(

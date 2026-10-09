@@ -24,6 +24,7 @@ from ..config import (
     CONSECUTIVE_LOCK_FRAMES,
     ENROLLMENT_FRAMES,
     IMAGENET_MEAN_BGR,
+    LIVE_SIM_EMA_ALPHA,
     MATCH_SIM_THRESHOLD,
     RECORDINGS_DIR,
     REID_CHECK_INTERVAL_SEC,
@@ -333,14 +334,12 @@ class MultiCameraCoordinator:
                 )
                 if was_confirmed and held_gid and tracklet.status == "CONFIRMED":
                     sim = self.identity_mgr.similarity_to(held_gid, emb)
-                    if sim < MATCH_SIM_THRESHOLD:
-                        tracklet.consecutive_weak += 1
-                        if tracklet.consecutive_weak >= CONSECUTIVE_LOCK_FRAMES:
-                            self.quality_gate.reset_track(cid, tid)
-                            tracklet.reset_identity()
-                    else:
-                        tracklet.consecutive_weak = 0
-                        tracklet.similarity_score = sim
+                    release = tracklet.observe_confirmed_similarity(
+                        sim, LIVE_SIM_EMA_ALPHA, MATCH_SIM_THRESHOLD, CONSECUTIVE_LOCK_FRAMES
+                    )
+                    if release:
+                        self.quality_gate.reset_track(cid, tid)
+                        tracklet.reset_identity()
 
         # 5. In-camera matching. GIDs already held on this camera are occupied,
         #    so a second person cannot inherit the first person's ID.

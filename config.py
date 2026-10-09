@@ -161,6 +161,7 @@ MAX_EXEMPLARS_PER_ID = 5         # Maximum diverse appearance exemplars stored p
 MATCH_MARGIN = 0.05              # Best match must beat the runner-up by this much
 STICKY_HYSTERESIS_BOOST = 0.08   # Bonus so a track keeps its current identity
 EMA_CENTROID_ALPHA = 0.15        # How fast an identity centroid follows new embeddings
+LIVE_SIM_EMA_ALPHA = 0.20        # How fast a confirmed track's shown similarity follows a new crop
 
 # -----------------------------------------------------------------------------
 # Balcony Enroller Config

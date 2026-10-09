@@ -11,7 +11,6 @@ import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple, Any
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 
 def l2norm(v: np.ndarray) -> np.ndarray:
@@ -56,14 +55,9 @@ class GlobalIdentity:
                 self.exemplars[most_redundant_idx] = normed
 
     def compute_similarity(self, candidate_emb: np.ndarray) -> float:
-        """
-        Multi-scale similarity:
-        Score = 0.6 * max(cand . exemplars) + 0.4 * (cand . centroid)
-        """
+        """Cosine similarity against the identity's single stored vector."""
         normed = l2norm(candidate_emb)
-        cent_sim = float(np.dot(normed, self.centroid))
-        max_ex_sim = max([float(np.dot(normed, ex)) for ex in self.exemplars], default=cent_sim)
-        return float(0.6 * max_ex_sim + 0.4 * cent_sim)
+        return float(np.dot(normed, self.centroid))
 
 
 class GlobalIdentityManager:
@@ -207,14 +201,15 @@ class GlobalIdentityManager:
         commit_exemplars: bool = False,
     ) -> Dict[int, Tuple[str, float]]:
         """
-        In-Camera 1-to-1 Hungarian Matching.
+        Each track claims only its single best gallery identity.
 
-        GIDs already visible on this camera (occupied_gids) are excluded so two
-        people in the same frame cannot share an identity. Enrollment cameras
-        mint a new GID for every unmatched track, including when the gallery is empty.
+        A claim is accepted when cosine similarity is at least match_threshold
+        and beats the second-best identity by match_margin. If two tracks claim
+        the same identity, the higher cosine wins and the other stays unmatched.
+        A taken identity is never replaced by a track's second-best person.
+        Enrollment cameras mint a new GID when no free identity clears the threshold.
         """
         occupied = {self.resolve_gid(g) for g in (occupied_gids or set()) if g}
-        MASKED = -10.0
 
         with self.lock:
             if not tracks_with_embs:
@@ -222,96 +217,105 @@ class GlobalIdentityManager:
 
             gids = list(self.identities.keys())
             assignments: Dict[int, Tuple[str, float]] = {}
-            assigned_gids_in_this_cam = set(occupied)
 
             if not gids:
                 if is_enrollment_cam:
                     for tid, emb, _, _ in tracks_with_embs:
                         new_gid = self._create_identity(emb)
                         assignments[tid] = (new_gid, 1.0)
-                        assigned_gids_in_this_cam.add(new_gid)
                         self.identities[new_gid].active_presence[cam_id] = (tid, capture_ts)
                 return assignments
 
-            N_tracks = len(tracks_with_embs)
-            M_gids = len(gids)
+            scored = []
+            for tid, emb, _box, curr_gid in tracks_with_embs:
+                pairs = [
+                    (self.identities[gid].compute_similarity(emb), gid)
+                    for gid in gids
+                ]
+                pairs.sort(key=lambda item: item[0], reverse=True)
+                best_sim, best_gid = pairs[0]
+                second_sim = pairs[1][0] if len(pairs) > 1 else -1.0
+                margin = (best_sim - second_sim) if len(pairs) > 1 else (best_sim + 1.0)
+                free_pairs = [(sim, gid) for sim, gid in pairs if gid not in occupied]
+                best_free = free_pairs[0][0] if free_pairs else 0.0
+                claimable = (
+                    best_gid not in occupied
+                    and best_sim >= self.match_threshold
+                    and margin >= self.match_margin
+                )
+                scored.append({
+                    "tid": tid,
+                    "emb": emb,
+                    "curr_gid": curr_gid,
+                    "best_gid": best_gid,
+                    "best_sim": float(best_sim),
+                    "second_sim": float(second_sim),
+                    "margin": float(margin),
+                    "best_free": float(best_free),
+                    "claimable": claimable,
+                })
 
-            sim_matrix = np.zeros((N_tracks, M_gids), dtype=np.float32)
+            claims: Dict[str, List[dict]] = {}
+            for row in scored:
+                self._log_match_row(
+                    cam_id,
+                    row["tid"],
+                    row["best_gid"],
+                    row["best_sim"],
+                    row["second_sim"],
+                    row["margin"],
+                    row["claimable"],
+                )
+                if row["claimable"]:
+                    claims.setdefault(row["best_gid"], []).append(row)
 
-            for i, (tid, emb, box, curr_gid) in enumerate(tracks_with_embs):
-                curr_res = self.resolve_gid(curr_gid) if curr_gid else None
-                for j, gid in enumerate(gids):
-                    if gid in occupied:
-                        sim_matrix[i, j] = MASKED
+            winners = set()
+            for gid, rows in claims.items():
+                rows.sort(key=lambda row: row["best_sim"], reverse=True)
+                winner = rows[0]
+                winners.add(winner["tid"])
+                score = winner["best_sim"]
+                assignments[winner["tid"]] = (gid, round(score, 3))
+                occupied.add(gid)
+                if commit_exemplars:
+                    self.identities[gid].add_exemplar(
+                        winner["emb"], max_exemplars=self.max_exemplars, ema_alpha=self.ema_alpha
+                    )
+                    self.identities[gid].active_presence[cam_id] = (winner["tid"], capture_ts)
+                curr = winner["curr_gid"]
+                if not curr or self.resolve_gid(curr) != gid:
+                    self.log_event(
+                        "MATCH",
+                        f"[{cam_id}] Track #{winner['tid']} matched {self.identities[gid].name} ({gid}) | Sim: {score:.2f}",
+                        {"cam_id": cam_id, "track_id": winner["tid"], "gid": gid, "sim": score},
+                    )
+
+            if is_enrollment_cam:
+                for row in scored:
+                    if row["tid"] in assignments or row["tid"] in winners:
                         continue
-                    sim = self.identities[gid].compute_similarity(emb)
-                    if curr_res == gid:
-                        sim += self.sticky_boost
-                    sim_matrix[i, j] = sim
-
-            cost_matrix = 1.0 - sim_matrix
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-            for r, c in zip(row_ind, col_ind):
-                tid, emb, box, curr_gid = tracks_with_embs[r]
-                matched_gid = gids[c]
-                raw_score = float(sim_matrix[r, c])
-                if raw_score <= MASKED + 1 or matched_gid in occupied:
-                    continue
-
-                sticky = bool(curr_gid and self.resolve_gid(curr_gid) == matched_gid)
-                actual_sim = raw_score - (self.sticky_boost if sticky else 0.0)
-
-                valid_scores = [float(s) for s in sim_matrix[r, :] if s > MASKED + 1]
-                valid_scores.sort(reverse=True)
-                second_score = valid_scores[1] if len(valid_scores) > 1 else -1.0
-                margin = raw_score - second_score if second_score > MASKED else raw_score + 1.0
-
-                is_match = actual_sim >= self.match_threshold and margin >= self.match_margin
-
-                try:
-                    if self.debug_csv is not None:
-                        self.debug_csv.write(
-                            f"{time.time()},{cam_id},{tid},{matched_gid},{actual_sim:.4f},{second_score:.4f},{margin:.4f},{is_match}\n"
-                        )
-                        self.debug_csv.flush()
-                except Exception:
-                    pass
-
-                if is_match:
-                    assignments[tid] = (matched_gid, round(actual_sim, 3))
-                    assigned_gids_in_this_cam.add(matched_gid)
-                    occupied.add(matched_gid)
-                    if commit_exemplars:
-                        self.identities[matched_gid].add_exemplar(
-                            emb, max_exemplars=self.max_exemplars, ema_alpha=self.ema_alpha
-                        )
-                        self.identities[matched_gid].active_presence[cam_id] = (tid, capture_ts)
-                    if not curr_gid or self.resolve_gid(curr_gid) != matched_gid:
-                        self.log_event(
-                            "MATCH",
-                            f"[{cam_id}] Track #{tid} matched {self.identities[matched_gid].name} ({matched_gid}) | Sim: {actual_sim:.2f}",
-                            {"cam_id": cam_id, "track_id": tid, "gid": matched_gid, "sim": actual_sim},
-                        )
-
-            for i, (tid, emb, box, curr_gid) in enumerate(tracks_with_embs):
-                if tid not in assignments and is_enrollment_cam:
-                    # Ignore GIDs already taken in this frame. A high score against
-                    # a neighbor must not block minting a new identity.
-                    free_scores = [
-                        float(sim_matrix[i, j])
-                        for j, gid in enumerate(gids)
-                        if gid not in occupied and float(sim_matrix[i, j]) > MASKED + 1
-                    ]
-                    best_sim = max(free_scores) if free_scores else 0.0
-                    if best_sim < self.match_threshold:
-                        new_gid = self._create_identity(emb)
-                        assignments[tid] = (new_gid, 1.0)
-                        assigned_gids_in_this_cam.add(new_gid)
-                        occupied.add(new_gid)
-                        self.identities[new_gid].active_presence[cam_id] = (tid, capture_ts)
+                    # A track that wanted an existing identity stays unknown.
+                    # A high score against someone already in this frame does not
+                    # block a new balcony identity.
+                    if row["claimable"] or row["best_free"] >= self.match_threshold:
+                        continue
+                    new_gid = self._create_identity(row["emb"])
+                    assignments[row["tid"]] = (new_gid, 1.0)
+                    occupied.add(new_gid)
+                    self.identities[new_gid].active_presence[cam_id] = (row["tid"], capture_ts)
 
             return assignments
+
+    def _log_match_row(self, cam_id, tid, best_gid, best_sim, second_sim, margin, is_match):
+        try:
+            if self.debug_csv is not None:
+                second = f"{second_sim:.4f}" if second_sim >= 0 else ""
+                self.debug_csv.write(
+                    f"{time.time()},{cam_id},{tid},{best_gid},{best_sim:.4f},{second},{margin:.4f},{is_match}\n"
+                )
+                self.debug_csv.flush()
+        except Exception:
+            pass
 
     def _create_identity(self, initial_embedding: np.ndarray, avatar: Optional[np.ndarray] = None) -> str:
         """Internal helper to mint a new Global ID."""
