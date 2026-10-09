@@ -191,9 +191,6 @@ class MultiCameraCoordinator:
 
         # Automatically upload to Google Drive using rclone in the background
         if hasattr(self, 'run_folder') and self.run_folder:
-            import subprocess
-            import os
-            
             # The remote is assumed to be named 'drive'. It uploads to a folder named after the session.
             remote_path = f"drive:OmniReID_Recordings/{os.path.basename(self.run_folder)}"
             print(f"[Coordinator] Starting background rclone sync to Google Drive: {remote_path}", flush=True)
