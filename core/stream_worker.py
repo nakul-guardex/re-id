@@ -210,7 +210,13 @@ class StreamWorker:
             with self.lock:
                 self.status = StreamStatus.ONLINE if not self.joined_late else StreamStatus.HOT_JOINED
                 self.consecutive_failures = 0
-            print(f"[Worker-{self.cam_id}] Stream connected: {self.name}", flush=True)
+            if self.file_mode:
+                print(
+                    f"[Worker-{self.cam_id}] Playing recorded video {source} at {self.playback_fps:.1f} fps",
+                    flush=True,
+                )
+            else:
+                print(f"[Worker-{self.cam_id}] Live RTSP connected: {self.name}", flush=True)
 
             fps_timer = time.monotonic()
             fps_counter = 0
