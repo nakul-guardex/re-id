@@ -149,6 +149,7 @@ class SessionManager:
             worker.fallback_video = path
             worker.file_mode = True
             worker.finished = False
+            worker.downscale_width = 0
             worker._consumed.set()
             cfg = self.cameras_config.get(cid)
             if cfg is not None:
