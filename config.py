@@ -84,7 +84,7 @@ DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
         "rtsp": os.getenv("RTSP_URL_OFFICE_1", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_1"),
         "is_enrollment": False,
-        "enabled": False,
+        "enabled": True,
     },
     "office_2": {
         "id": "office_2",
@@ -92,7 +92,7 @@ DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
         "rtsp": os.getenv("RTSP_URL_OFFICE_2", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_2"),
         "is_enrollment": False,
-        "enabled": False,
+        "enabled": True,
     },
     "office_3": {
         "id": "office_3",
@@ -100,7 +100,7 @@ DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
         "rtsp": os.getenv("RTSP_URL_OFFICE_3", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_3"),
         "is_enrollment": False,
-        "enabled": False,
+        "enabled": True,
     },
     "office_4": {
         "id": "office_4",
@@ -108,7 +108,7 @@ DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
         "rtsp": os.getenv("RTSP_URL_OFFICE_4", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_4"),
         "is_enrollment": False,
-        "enabled": False,
+        "enabled": True,
     },
     "office_5": {
         "id": "office_5",
@@ -116,7 +116,7 @@ DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
         "rtsp": os.getenv("RTSP_URL_OFFICE_5", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_5"),
         "is_enrollment": False,
-        "enabled": False,
+        "enabled": True,
     },
 }
 
