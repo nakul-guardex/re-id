@@ -18,8 +18,23 @@ import torch
 import yaml
 from ultralytics import YOLO
 from ultralytics.trackers.byte_tracker import BYTETracker
+from ultralytics.utils.ops import scale_masks
 
 from ..config import TRACKER_TYPE
+
+
+def align_instance_mask(mask: np.ndarray, frame_h: int, frame_w: int) -> np.ndarray:
+    """Map a YOLO instance mask onto the original frame.
+
+    Masks from the network are letterboxed. A plain resize keeps the gray bars
+    and shifts the silhouette, so the Re-ID crop contains background.
+    """
+    mask = np.asarray(mask)
+    if mask.shape[:2] == (frame_h, frame_w):
+        return mask > 0.5
+    tensor = torch.from_numpy(mask.astype(np.float32))[None, None]
+    aligned = scale_masks(tensor, (frame_h, frame_w), padding=True)
+    return aligned[0, 0].numpy() > 0.5
 
 
 @dataclass
@@ -106,9 +121,10 @@ class CameraTracker:
             score = float(t[5])
             raw_idx = int(t[7]) if len(t) > 7 else -1
 
-            # Match mask
+            # Match mask. YOLO masks are in letterboxed network space; stretch-resize
+            # would leave balcony and office background inside the person crop.
             if raw_masks is not None and 0 <= raw_idx < len(raw_masks):
-                m_single = cv2.resize(raw_masks[raw_idx], (w_frame, h_frame), interpolation=cv2.INTER_LINEAR) > 0.5
+                m_single = align_instance_mask(raw_masks[raw_idx], h_frame, w_frame)
             else:
                 # Fallback if mask missing
                 m_single = np.zeros((h_frame, w_frame), dtype=bool)
@@ -167,6 +183,7 @@ class MultiCameraTrackerEngine:
             conf=conf,
             verbose=False,
             device=self.device,
+            retina_masks=True,
         )
         return results
 
