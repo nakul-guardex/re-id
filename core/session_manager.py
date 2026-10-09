@@ -10,6 +10,7 @@ in parallel, and manages hot-joining / graceful shutdown.
 
 from datetime import datetime
 import enum
+import os
 import threading
 import time
 import uuid
@@ -135,6 +136,23 @@ class SessionManager:
                 "passing_cameras": f"{passing_count}/{total_active}",
                 "details": self.probe_results,
             }
+
+    def use_recorded_videos(self, paths: Dict[str, str]) -> None:
+        """Point the workers at local MP4s. The next session reads every frame."""
+        for cid, path in paths.items():
+            worker = self.workers.get(cid)
+            if worker is None:
+                raise KeyError(f"Unknown camera {cid}")
+            if not path or not os.path.isfile(path):
+                raise FileNotFoundError(path)
+            worker.rtsp_url = ""
+            worker.fallback_video = path
+            worker.file_mode = True
+            worker.finished = False
+            worker._consumed.set()
+            cfg = self.cameras_config.get(cid)
+            if cfg is not None:
+                cfg["fallback_video"] = path
 
     def start_session(self, camera_ids: Optional[List[str]] = None) -> str:
         """

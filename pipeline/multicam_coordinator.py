@@ -241,6 +241,7 @@ class MultiCameraCoordinator:
                 active_workers.append((cid, worker, frame, cap_ts))
                 self.last_cap_ts[cid] = cap_ts
                 self.last_seen_ts[cid] = now
+                worker.release_file_frame()
             else:
                 last_seen = self.last_seen_ts.get(cid, now)
                 if (now - last_seen) > DROP_TIMEOUT_SEC:
@@ -250,7 +251,12 @@ class MultiCameraCoordinator:
                     worker.set_annotated_frame(last_ann)
 
         if not active_workers:
-            time.sleep(0.02)
+            file_workers = [w for w in self.session_mgr.workers.values() if w.file_mode]
+            if file_workers and all(w.finished for w in file_workers):
+                print("[Coordinator] Recorded videos finished.", flush=True)
+                self.running = False
+            else:
+                time.sleep(0.02)
             return last_heartbeat, cycle_count
 
         # 2. Batched YOLO11-Seg Detection on all frames in parallel on GPU
@@ -463,7 +469,8 @@ class MultiCameraCoordinator:
                 if self.video_writers[cid] is None:
                     h, w = annotated.shape[:2]
                     out_path = os.path.join(self.run_folder, f"{cid}.mp4")
-                    self.video_writers[cid] = FfmpegMp4Writer(out_path, TARGET_DETECTION_FPS, w, h)
+                    out_fps = worker.playback_fps if worker.playback_fps > 0 else TARGET_DETECTION_FPS
+                    self.video_writers[cid] = FfmpegMp4Writer(out_path, out_fps, w, h)
                 writer = self.video_writers[cid]
                 if writer is not None and writer.isOpened():
                     writer.write(annotated)

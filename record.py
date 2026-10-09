@@ -1,50 +1,70 @@
+"""Record all six RTSP cameras at the camera frame rate, without re-encoding."""
+
+import argparse
+import os
 import subprocess
-from datetime import datetime
+import sys
+from pathlib import Path
 
-# Dictionary of RTSP streams from config.py
-CAMERAS = {
-    "office_1": "rtsp://admin:aniket12@122.176.35.187:5554/Streaming/Channels/101",
-    "office_2": "rtsp://admin:Cctv%401234@122.176.35.187:2554/cam/realmonitor?channel=02&subtype=0",
-    "office_3": "rtsp://admin:Cctv%401234@122.176.35.187:2554/cam/realmonitor?channel=03&subtype=0",
-    "office_4": "rtsp://admin:Admin%40123@122.176.35.187:554/cam/realmonitor?channel=3&subtype=0",
-    "office_5": "rtsp://admin:Admin%40123@122.176.35.187:554/cam/realmonitor?channel=6&subtype=0"
-}
+CAMERA_ENV = (
+    "office_balcony",
+    "office_1",
+    "office_2",
+    "office_3",
+    "office_4",
+    "office_5",
+)
 
-# Duration in seconds (1 minute = 60 seconds)
-DURATION = 60
 
-def main():
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seconds", type=int, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args()
+
+    cameras = {}
+    for cam_id in CAMERA_ENV:
+        url = os.environ.get(f"RTSP_URL_{cam_id.upper()}", "").strip()
+        if not url:
+            sys.exit(f"Missing RTSP_URL_{cam_id.upper()}")
+        cameras[cam_id] = url
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    print(f"Recording {len(cameras)} cameras for {args.seconds} seconds into {args.out}", flush=True)
+
     processes = []
-    
-    print(f"▶️ Starting recording for {len(CAMERAS)} cameras for {DURATION} seconds...")
-    
-    for cam_name, rtsp_url in CAMERAS.items():
-        output_file = f"{cam_name}_{timestamp}.mp4"
-        
-        ffmpeg_cmd = [
-            "ffmpeg",
+    for cam_id, rtsp_url in cameras.items():
+        output_file = args.out / f"{cam_id}.mp4"
+        log_file = args.out / f"{cam_id}.log"
+        log = log_file.open("w")
+        cmd = [
+            "ffmpeg", "-y",
             "-rtsp_transport", "tcp",
             "-i", rtsp_url,
-            "-t", str(DURATION),
+            "-t", str(args.seconds),
             "-c", "copy",
             "-an",
-            output_file
+            str(output_file),
         ]
-        
-        # Start the process non-blocking
-        p = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        processes.append((cam_name, p, output_file))
-        print(f"  [{cam_name}] Started recording -> {output_file}")
-        
-    print("⏳ Waiting for all recordings to finish...")
-    
-    # Wait for all processes to complete
-    for cam_name, p, output_file in processes:
-        p.wait()
-        print(f"✅ [{cam_name}] Recording complete.")
-        
-    print("🎉 All recordings finished successfully.")
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log)
+        processes.append((cam_id, proc, output_file, log))
+        print(f"  [{cam_id}] -> {output_file.name}", flush=True)
+
+    failed = []
+    for cam_id, proc, output_file, log in processes:
+        code = proc.wait()
+        log.close()
+        size = output_file.stat().st_size if output_file.exists() else 0
+        if code != 0 or size < 1000:
+            failed.append(cam_id)
+            print(f"  [{cam_id}] failed (exit {code}, {size} bytes)", flush=True)
+        else:
+            print(f"  [{cam_id}] saved {size / 1e6:.1f} MB", flush=True)
+
+    if failed:
+        sys.exit(f"Recording failed for: {', '.join(failed)}")
+    print("All six recordings finished.", flush=True)
+
 
 if __name__ == "__main__":
     main()

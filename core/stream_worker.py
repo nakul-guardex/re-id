@@ -82,6 +82,11 @@ class StreamWorker:
         self.joined_late: bool = False
         self.last_error: str = ""
         self.video_writer = None
+        self.file_mode = False
+        self.finished = False
+        self.playback_fps = 0.0
+        self._consumed = threading.Event()
+        self._consumed.set()
 
         # Placeholder JPEG for offline streams
         self._placeholder_jpeg = self._create_placeholder(f"[{self.name}] Camera Offline")
@@ -169,6 +174,7 @@ class StreamWorker:
 
         while self.running:
             source = self.rtsp_url or self.fallback_video
+            self.file_mode = bool(source) and not str(source).startswith("rtsp://")
             if not source:
                 with self.lock:
                     self.status = StreamStatus.FAILED
@@ -185,9 +191,19 @@ class StreamWorker:
                     self.status = StreamStatus.FAILED
                     self.reconnect_count += 1
                     self.last_error = "Connection failed"
+                    if self.file_mode:
+                        self.finished = True
+                        self.running = False
+                if self.file_mode:
+                    print(f"[Worker-{self.cam_id}] Could not open recorded video: {source}", flush=True)
+                    return
                 time.sleep(min(backoff_sec, 15.0))
                 backoff_sec *= 1.5
                 continue
+
+            if self.file_mode:
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                self.playback_fps = fps if 1.0 <= fps <= 120.0 else 25.0
 
             # Connected successfully
             backoff_sec = 1.0
@@ -200,10 +216,21 @@ class StreamWorker:
             fps_counter = 0
 
             while self.running:
+                if self.file_mode and not self._consumed.wait(timeout=0.2):
+                    continue
+
                 ret, frame = cap.read()
                 capture_ts = time.monotonic()
 
                 if not ret or frame is None:
+                    if self.file_mode:
+                        with self.lock:
+                            self.finished = True
+                            self.running = False
+                            self.status = StreamStatus.STOPPED
+                        print(f"[Worker-{self.cam_id}] Recorded video finished.", flush=True)
+                        cap.release()
+                        return
                     with self.lock:
                         self.consecutive_failures += 1
                     if self.consecutive_failures > 30:
@@ -245,6 +272,8 @@ class StreamWorker:
                     self.fps = current_fps
                     self.width = proc_frame.shape[1]
                     self.height = proc_frame.shape[0]
+                    if self.file_mode:
+                        self._consumed.clear()
 
             cap.release()
             time.sleep(1.0)
@@ -255,6 +284,11 @@ class StreamWorker:
             if self.latest_raw_frame is None:
                 return None, self.latest_capture_ts, self.fps, self.status
             return self.latest_raw_frame.copy(), self.latest_capture_ts, self.fps, self.status
+
+    def release_file_frame(self) -> None:
+        """Let a recorded-video reader fetch the next frame. Live RTSP ignores this."""
+        if self.file_mode:
+            self._consumed.set()
 
     def set_annotated_frame(self, frame: np.ndarray):
         """Stores the processed AI frame for the live web feed."""
