@@ -79,6 +79,12 @@
               <span class="status-indicator {% if not cfg.enabled %}standby{% endif %}" id="stat_{{ cam_id }}">{% if cfg.enabled %}OFFLINE{% else %}STANDBY{% endif %}</span>
               <span class="cam-res" id="res_{{ cam_id }}">--</span>
             </div>
+            {% if cam_id == "office_balcony" %}
+            <div class="tripwire-control" style="padding: 10px; background: #334155; border-radius: 0 0 12px 12px; margin-top: 1px;">
+              <label style="font-size: 12px; color: #cbd5e1; display: block; margin-bottom: 5px;">Enroller Tripwire Y-Position:</label>
+              <input type="range" min="0" max="100" value="50" oninput="updateTripwire(this.value)" style="width: 100%; cursor: pointer;">
+            </div>
+            {% endif %}
           </div>
           {% endfor %}
         </div>
@@ -100,8 +106,8 @@
         <!-- Live Activity & Merge Audit Log -->
         <div class="panel-card log-panel">
           <div class="panel-header">
-            <h3>Live Activity & Merge Log</h3>
-            <span class="panel-subtitle">Dynamic Online Reconciliation</span>
+            <h3>Live Activity</h3>
+            <span class="panel-subtitle">Balcony enrollment and camera matches</span>
           </div>
           <div class="event-feed" id="eventFeed">
             <div class="empty-state">Event stream ready.</div>

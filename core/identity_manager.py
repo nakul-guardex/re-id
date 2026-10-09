@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 """
-Global Identity Manager & Cross-Camera Fusion Engine (v2)
-==========================================================
-Manages:
-  1. Tentative and Confirmed identity tiers
-  2. Capture-timestamp ordered Reorder Buffer
-  3. In-Camera 1-to-1 Exclusivity (Hungarian matching)
-  4. Cross-Camera Multi-Exemplar & Centroid Matching
-  5. Hard Spatial Co-Occurrence (Cannot-Link) Graph
-  6. Reversible Dynamic Online Merging with Undo
+Global Identity Manager
+=======================
+Enrolls people on the balcony camera and matches those identities
+on the other cameras. Two people in one frame never share an ID.
 """
 
-from dataclasses import dataclass, field
-import heapq
+import atexit
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -23,20 +17,6 @@ from scipy.optimize import linear_sum_assignment
 def l2norm(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 0 else v
-
-
-@dataclass
-class MergeEvent:
-    merge_id: str
-    survivor_gid: str
-    absorbed_gid: str
-    similarity: float
-    evidence: str
-    timestamp: float
-    pre_merge_exemplars_survivor: List[np.ndarray]
-    pre_merge_exemplars_absorbed: List[np.ndarray]
-    pre_merge_avatar_absorbed: Optional[np.ndarray]
-    undone: bool = False
 
 
 class GlobalIdentity:
@@ -87,45 +67,94 @@ class GlobalIdentity:
 
 
 class GlobalIdentityManager:
-    """
-    Coordinator of cross-camera identities, Hungarian matching,
-    co-occurrence blacklists, and online reconciliation.
-    """
+    """Matches balcony-enrolled identities onto the other cameras."""
 
     def __init__(
         self,
         palette: List[Tuple[int, int, int]],
         match_threshold: float = 0.48,
         match_margin: float = 0.03,
-        merge_threshold: float = 0.54,
         sticky_boost: float = 0.08,
+        max_exemplars: int = 5,
+        ema_alpha: float = 0.15,
     ):
         self.palette = palette
         self.match_threshold = match_threshold
         self.match_margin = match_margin
-        self.merge_threshold = merge_threshold
         self.sticky_boost = sticky_boost
+        self.max_exemplars = max_exemplars
+        self.ema_alpha = ema_alpha
 
         self.lock = threading.RLock()
         self.identities: Dict[str, GlobalIdentity] = {}
         self._next_id_counter = 1
-
-        # Cannot-link graph: (gid_a, gid_b) -> True
-        self.cannot_link_pairs: Set[Tuple[str, str]] = set()
-
-        # Reversible merge history and Union-Find alias map
-        self.merge_history: List[MergeEvent] = []
-        self.aliases: Dict[str, str] = {}  # absorbed_gid -> survivor_gid
+        self.aliases: Dict[str, str] = {}
 
         # Live audit log of events
         self.event_log: List[Dict[str, Any]] = []
+        self.debug_csv = None
+        self._open_debug_csv()
+        atexit.register(self.close)
 
-        import os
-        write_header = not os.path.exists("matching_debug.csv")
-        self.debug_csv = open("matching_debug.csv", "a")
+    def _open_debug_csv(self):
+        from ..config import LOGS_DIR
+        path = LOGS_DIR / "matching_debug.csv"
+        write_header = not path.exists()
+        self.debug_csv = open(path, "a")
         if write_header:
             self.debug_csv.write("timestamp,camera,track_id,best_gid,actual_sim,second_best_sim,margin,is_match\n")
             self.debug_csv.flush()
+
+    def close(self):
+        with self.lock:
+            if self.debug_csv is not None:
+                try:
+                    self.debug_csv.close()
+                except Exception:
+                    pass
+                self.debug_csv = None
+
+    def reset(self):
+        """Clears the gallery for a new analysis session."""
+        with self.lock:
+            self.identities.clear()
+            self._next_id_counter = 1
+            self.aliases.clear()
+            self.event_log.clear()
+            self.close()
+            self._open_debug_csv()
+
+    def apply_match(
+        self,
+        gid: str,
+        cam_id: str,
+        tid: int,
+        embedding: np.ndarray,
+        capture_ts: float,
+        score: float = 0.0,
+        log: bool = False,
+    ):
+        """Commits a confirmed match: update exemplars and camera presence."""
+        with self.lock:
+            gid = self.resolve_gid(gid)
+            ident = self.identities.get(gid)
+            if ident is None:
+                return
+            ident.add_exemplar(embedding, max_exemplars=self.max_exemplars, ema_alpha=self.ema_alpha)
+            ident.active_presence[cam_id] = (tid, capture_ts)
+            if log:
+                self.log_event(
+                    "MATCH",
+                    f"[{cam_id}] Track #{tid} matched {ident.name} ({gid}) | Sim: {score:.2f}",
+                    {"cam_id": cam_id, "track_id": tid, "gid": gid, "sim": score},
+                )
+
+    def update_presence(self, gid: str, cam_id: str, tid: int, capture_ts: float):
+        with self.lock:
+            gid = self.resolve_gid(gid)
+            ident = self.identities.get(gid)
+            if ident is not None:
+                ident.active_presence[cam_id] = (tid, capture_ts)
 
     def log_event(self, event_type: str, message: str, details: Optional[Dict[str, Any]] = None):
         print(f"[{event_type}] {message}", flush=True)
@@ -141,122 +170,123 @@ class GlobalIdentityManager:
 
     def resolve_gid(self, gid: str) -> str:
         """Union-Find path compression to resolve aliased/merged IDs."""
-        curr = gid
-        visited = []
-        while curr in self.aliases:
-            visited.append(curr)
-            curr = self.aliases[curr]
-        for v in visited:
-            self.aliases[v] = curr
-        return curr
-
-    def record_co_occurrence(self, cam_id: str, active_gids_in_frame: List[str]):
-        """
-        Hard Spatial Co-Occurrence Rule:
-        If two or more confirmed GIDs appear in the SAME camera frame,
-        they can NEVER be merged (they are physically two distinct humans).
-        """
-        resolved = list(set([self.resolve_gid(g) for g in active_gids_in_frame if g in self.identities]))
-        if len(resolved) < 2:
-            return
-
         with self.lock:
-            for i in range(len(resolved)):
-                for j in range(i + 1, len(resolved)):
-                    g1, g2 = resolved[i], resolved[j]
-                    if g1 != g2:
-                        pair = (min(g1, g2), max(g1, g2))
-                        if pair not in self.cannot_link_pairs:
-                            self.cannot_link_pairs.add(pair)
-                            self.log_event(
-                                "CANNOT_LINK",
-                                f"{g1} and {g2} co-occurred in {cam_id} -> Barred from merging",
-                                {"pair": pair, "camera": cam_id},
-                            )
+            curr = gid
+            visited = []
+            while curr in self.aliases:
+                visited.append(curr)
+                curr = self.aliases[curr]
+            for v in visited:
+                self.aliases[v] = curr
+            return curr
+
+    def similarity_to(self, gid: str, embedding: np.ndarray) -> float:
+        with self.lock:
+            resolved = self.resolve_gid(gid)
+            ident = self.identities.get(resolved)
+            if ident is None:
+                return 0.0
+            return ident.compute_similarity(embedding)
+
+    def identity_view(self, gid: str) -> Optional[Tuple[str, str, Tuple[int, int, int]]]:
+        """Thread-safe snapshot of (gid, name, bgr color) for rendering."""
+        with self.lock:
+            resolved = self.resolve_gid(gid)
+            ident = self.identities.get(resolved)
+            if ident is None:
+                return None
+            return resolved, ident.name, ident.color
 
     def match_camera_tracks(
         self,
         cam_id: str,
         tracks_with_embs: List[Tuple[int, np.ndarray, np.ndarray, Optional[str]]],
         capture_ts: float,
+        occupied_gids: Optional[Set[str]] = None,
+        is_enrollment_cam: bool = False,
+        commit_exemplars: bool = False,
     ) -> Dict[int, Tuple[str, float]]:
         """
-        In-Camera 1-to-1 Hungarian Matching:
-        Matches a set of local tracks in a single camera to known Global IDs.
-        Guarantees that within this camera frame:
-          - No two tracks receive the same Global ID.
-          - Tracks with existing IDs receive sticky hysteresis.
-        
-        Args:
-            cam_id: Camera ID
-            tracks_with_embs: List of (track_id, candidate_emb, box, current_assigned_gid)
-            capture_ts: Monotonic capture timestamp
-            
-        Returns:
-            Dict[track_id, (assigned_gid, similarity_score)]
+        In-Camera 1-to-1 Hungarian Matching.
+
+        GIDs already visible on this camera (occupied_gids) are excluded so two
+        people in the same frame cannot share an identity. Enrollment cameras
+        mint a new GID for every unmatched track, including when the gallery is empty.
         """
+        occupied = {self.resolve_gid(g) for g in (occupied_gids or set()) if g}
+        MASKED = -10.0
+
         with self.lock:
             if not tracks_with_embs:
                 return {}
 
-            # Active confirmed global identities
             gids = list(self.identities.keys())
+            assignments: Dict[int, Tuple[str, float]] = {}
+            assigned_gids_in_this_cam = set(occupied)
+
             if not gids:
-                # No identities enrolled yet -> enroll first candidate
-                assignments = {}
-                tid, emb, _, _ = tracks_with_embs[0]
-                new_gid = self._create_identity(emb)
-                assignments[tid] = (new_gid, 1.0)
-                self.identities[new_gid].active_presence[cam_id] = (tid, capture_ts)
+                if is_enrollment_cam:
+                    for tid, emb, _, _ in tracks_with_embs:
+                        new_gid = self._create_identity(emb)
+                        assignments[tid] = (new_gid, 1.0)
+                        assigned_gids_in_this_cam.add(new_gid)
+                        self.identities[new_gid].active_presence[cam_id] = (tid, capture_ts)
                 return assignments
 
             N_tracks = len(tracks_with_embs)
             M_gids = len(gids)
 
-            # Build similarity matrix (N_tracks x M_gids)
             sim_matrix = np.zeros((N_tracks, M_gids), dtype=np.float32)
 
             for i, (tid, emb, box, curr_gid) in enumerate(tracks_with_embs):
                 curr_res = self.resolve_gid(curr_gid) if curr_gid else None
                 for j, gid in enumerate(gids):
+                    if gid in occupied:
+                        sim_matrix[i, j] = MASKED
+                        continue
                     sim = self.identities[gid].compute_similarity(emb)
-                    # Apply sticky bonus if this track already held this GID
                     if curr_res == gid:
                         sim += self.sticky_boost
                     sim_matrix[i, j] = sim
 
-            # Cost matrix for Hungarian Linear Sum Assignment: Cost = 1 - Sim
             cost_matrix = 1.0 - sim_matrix
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-            assignments: Dict[int, Tuple[str, float]] = {}
-            assigned_gids_in_this_cam = set()
 
             for r, c in zip(row_ind, col_ind):
                 tid, emb, box, curr_gid = tracks_with_embs[r]
                 matched_gid = gids[c]
                 raw_score = float(sim_matrix[r, c])
-                actual_sim = raw_score - (self.sticky_boost if (curr_gid and self.resolve_gid(curr_gid) == matched_gid) else 0.0)
+                if raw_score <= MASKED + 1 or matched_gid in occupied:
+                    continue
 
-                # Check margin over second best
-                row_scores = sorted(sim_matrix[r, :], reverse=True)
-                second_score = row_scores[1] if len(row_scores) > 1 else -1.0
-                margin = raw_score - second_score
-                
+                sticky = bool(curr_gid and self.resolve_gid(curr_gid) == matched_gid)
+                actual_sim = raw_score - (self.sticky_boost if sticky else 0.0)
+
+                valid_scores = [float(s) for s in sim_matrix[r, :] if s > MASKED + 1]
+                valid_scores.sort(reverse=True)
+                second_score = valid_scores[1] if len(valid_scores) > 1 else -1.0
+                margin = raw_score - second_score if second_score > MASKED else raw_score + 1.0
+
                 is_match = actual_sim >= self.match_threshold and margin >= self.match_margin
-                
-                # Write to CSV
+
                 try:
-                    self.debug_csv.write(f"{time.time()},{cam_id},{tid},{matched_gid},{actual_sim:.4f},{second_score:.4f},{margin:.4f},{is_match}\n")
-                    self.debug_csv.flush()
+                    if self.debug_csv is not None:
+                        self.debug_csv.write(
+                            f"{time.time()},{cam_id},{tid},{matched_gid},{actual_sim:.4f},{second_score:.4f},{margin:.4f},{is_match}\n"
+                        )
+                        self.debug_csv.flush()
                 except Exception:
                     pass
 
                 if is_match:
                     assignments[tid] = (matched_gid, round(actual_sim, 3))
                     assigned_gids_in_this_cam.add(matched_gid)
-                    self.identities[matched_gid].add_exemplar(emb)
-                    self.identities[matched_gid].active_presence[cam_id] = (tid, capture_ts)
+                    occupied.add(matched_gid)
+                    if commit_exemplars:
+                        self.identities[matched_gid].add_exemplar(
+                            emb, max_exemplars=self.max_exemplars, ema_alpha=self.ema_alpha
+                        )
+                        self.identities[matched_gid].active_presence[cam_id] = (tid, capture_ts)
                     if not curr_gid or self.resolve_gid(curr_gid) != matched_gid:
                         self.log_event(
                             "MATCH",
@@ -264,21 +294,22 @@ class GlobalIdentityManager:
                             {"cam_id": cam_id, "track_id": tid, "gid": matched_gid, "sim": actual_sim},
                         )
 
-            # For tracks that did not match any existing GID with sufficient score:
-            # Check if they should enroll as brand new Global IDs
             for i, (tid, emb, box, curr_gid) in enumerate(tracks_with_embs):
-                if tid not in assignments:
-                    # Check best score against all GIDs
-                    best_sim = float(np.max(sim_matrix[i, :])) if M_gids > 0 else 0.0
+                if tid not in assignments and is_enrollment_cam:
+                    # Ignore GIDs already taken in this frame. A high score against
+                    # a neighbor must not block minting a new identity.
+                    free_scores = [
+                        float(sim_matrix[i, j])
+                        for j, gid in enumerate(gids)
+                        if gid not in occupied and float(sim_matrix[i, j]) > MASKED + 1
+                    ]
+                    best_sim = max(free_scores) if free_scores else 0.0
                     if best_sim < self.match_threshold:
-                        # New person discovered!
                         new_gid = self._create_identity(emb)
                         assignments[tid] = (new_gid, 1.0)
                         assigned_gids_in_this_cam.add(new_gid)
+                        occupied.add(new_gid)
                         self.identities[new_gid].active_presence[cam_id] = (tid, capture_ts)
-
-            # Record co-occurrences of all assigned GIDs in this frame
-            self.record_co_occurrence(cam_id, list(assigned_gids_in_this_cam))
 
             return assignments
 
@@ -293,144 +324,6 @@ class GlobalIdentityManager:
         self.identities[gid] = identity
         self.log_event("ENROLLED", f"Discovered and enrolled {name} ({gid})", {"gid": gid})
         return gid
-
-    def run_reconciliation_cycle(self) -> List[Dict[str, Any]]:
-        """
-        Asynchronous Reconciliation Worker:
-        Evaluates active Global ID pairs that have NEVER co-occurred in the same camera.
-        If their similarity exceeds merge_threshold (0.54), merges them with full rollback history.
-        """
-        with self.lock:
-            gids = list(self.identities.keys())
-            if len(gids) < 2:
-                return []
-
-            merges_performed = []
-
-            for i in range(len(gids)):
-                for j in range(i + 1, len(gids)):
-                    gid_a = self.resolve_gid(gids[i])
-                    gid_b = self.resolve_gid(gids[j])
-                    if gid_a == gid_b:
-                        continue
-
-                    pair = (min(gid_a, gid_b), max(gid_a, gid_b))
-                    if pair in self.cannot_link_pairs:
-                        continue  # Hard negative constraint: cannot merge!
-
-                    id_a = self.identities[gid_a]
-                    id_b = self.identities[gid_b]
-
-                    # Compute pairwise similarity
-                    sim_cent = float(np.dot(id_a.centroid, id_b.centroid))
-                    max_cross = max([
-                        float(np.dot(ex_a, ex_b))
-                        for ex_a in id_a.exemplars
-                        for ex_b in id_b.exemplars
-                    ], default=sim_cent)
-
-                    combined_sim = 0.6 * max_cross + 0.4 * sim_cent
-
-                    if combined_sim >= self.merge_threshold:
-                        # Perform reversible merge: absorb B into A
-                        merge_event = self._merge_identities(gid_a, gid_b, combined_sim)
-                        merges_performed.append(merge_event)
-                        break  # Break inner loop to restart cycle cleanly
-
-            return merges_performed
-
-    def _merge_identities(self, survivor_gid: str, absorbed_gid: str, similarity: float) -> Dict[str, Any]:
-        """Atomically merges absorbed_gid into survivor_gid."""
-        survivor = self.identities[survivor_gid]
-        absorbed = self.identities[absorbed_gid]
-
-        event_id = f"merge_{int(time.monotonic() * 1000)}"
-        event = MergeEvent(
-            merge_id=event_id,
-            survivor_gid=survivor_gid,
-            absorbed_gid=absorbed_gid,
-            similarity=round(similarity, 3),
-            evidence=f"Appearance similarity {similarity:.3f} >= {self.merge_threshold}",
-            timestamp=time.monotonic(),
-            pre_merge_exemplars_survivor=[ex.copy() for ex in survivor.exemplars],
-            pre_merge_exemplars_absorbed=[ex.copy() for ex in absorbed.exemplars],
-            pre_merge_avatar_absorbed=absorbed.avatar_bgr.copy() if absorbed.avatar_bgr is not None else None,
-        )
-        self.merge_history.append(event)
-
-        # Transfer exemplars & update centroid
-        for ex in absorbed.exemplars:
-            survivor.add_exemplar(ex)
-
-        # Transfer active presences
-        for cid, pres in absorbed.active_presence.items():
-            survivor.active_presence[cid] = pres
-
-        # Union cannot-link constraints
-        updated_links = set()
-        for pair in self.cannot_link_pairs:
-            p1, p2 = pair
-            if p1 == absorbed_gid:
-                p1 = survivor_gid
-            if p2 == absorbed_gid:
-                p2 = survivor_gid
-            if p1 != p2:
-                updated_links.add((min(p1, p2), max(p1, p2)))
-        self.cannot_link_pairs = updated_links
-
-        # Alias in Disjoint Set
-        self.aliases[absorbed_gid] = survivor_gid
-        self.identities.pop(absorbed_gid, None)
-
-        msg = f"[MERGED] {absorbed.name} ({absorbed_gid}) merged into {survivor.name} ({survivor_gid}) [Sim: {similarity:.3f}]"
-        self.log_event("MERGE", msg, {"event_id": event_id, "survivor": survivor_gid, "absorbed": absorbed_gid})
-        print(f"[IdentityManager] {msg}")
-
-        return {
-            "event_id": event_id,
-            "survivor": survivor_gid,
-            "absorbed": absorbed_gid,
-            "similarity": round(similarity, 3),
-            "message": msg,
-        }
-
-    def undo_merge(self, merge_id: str) -> bool:
-        """Rolls back a previous merge, restoring pre-merge exemplars and split IDs."""
-        with self.lock:
-            target_event: Optional[MergeEvent] = None
-            for evt in self.merge_history:
-                if evt.merge_id == merge_id and not evt.undone:
-                    target_event = evt
-                    break
-
-            if not target_event:
-                return False
-
-            # Restore survivor exemplars
-            if target_event.survivor_gid in self.identities:
-                survivor = self.identities[target_event.survivor_gid]
-                survivor.exemplars = target_event.pre_merge_exemplars_survivor
-                survivor.centroid = l2norm(np.mean(np.stack(survivor.exemplars), axis=0))
-
-            # Recreate absorbed identity
-            absorbed_gid = target_event.absorbed_gid
-            idx = int(absorbed_gid.replace("GID_", "")) if "GID_" in absorbed_gid else 99
-            name = f"Person #{idx}"
-            color = self.palette[(idx - 1) % len(self.palette)]
-
-            init_emb = target_event.pre_merge_exemplars_absorbed[0]
-            restored = GlobalIdentity(gid=absorbed_gid, name=name, color=color, initial_embedding=init_emb, avatar=target_event.pre_merge_avatar_absorbed)
-            for ex in target_event.pre_merge_exemplars_absorbed[1:]:
-                restored.add_exemplar(ex)
-
-            self.identities[absorbed_gid] = restored
-            self.aliases.pop(absorbed_gid, None)
-            target_event.undone = True
-
-            msg = f"[UNDO] Reverted merge of {absorbed_gid} from {target_event.survivor_gid}"
-            self.log_event("UNDO_MERGE", msg, {"event_id": merge_id})
-            print(f"[IdentityManager] {msg}")
-            return True
 
     def get_gallery_cards(self) -> List[Dict[str, Any]]:
         """Returns JSON-serializable list of active person cards for Web UI."""

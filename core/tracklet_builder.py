@@ -39,12 +39,31 @@ class Tracklet:
 
         # Global identity state
         self.assigned_gid: Optional[str] = None
+        self.candidate_gid: Optional[str] = None
         self.similarity_score: float = 0.0
-        self.status: str = "TENTATIVE"  # "TENTATIVE", "CONFIRMED", "UNKNOWN"
+        self.status: str = "UNKNOWN"  # "UNKNOWN", "TENTATIVE", "CONFIRMED"
         self.last_seen_ts: float = 0.0
+        self.last_reid_ts: float = 0.0
+        self.consecutive_passes: int = 0
         self.consecutive_weak: int = 0
         self.best_avatar: Optional[np.ndarray] = None
         self.best_avatar_quality: float = 0.0
+
+    def mark_seen(self, capture_ts: float):
+        self.last_seen_ts = capture_ts
+
+    def reset_identity(self):
+        """Forget GID assignment but keep the local tracker ID."""
+        self.samples.clear()
+        self.assigned_gid = None
+        self.candidate_gid = None
+        self.similarity_score = 0.0
+        self.status = "UNKNOWN"
+        self.consecutive_passes = 0
+        self.consecutive_weak = 0
+        self.best_avatar = None
+        self.best_avatar_quality = 0.0
+        self.last_reid_ts = 0.0
 
     @property
     def sample_count(self) -> int:
@@ -70,9 +89,9 @@ class Tracklet:
             median_emb = np.median(np.stack([s.embedding for s in self.samples]), axis=0)
             median_emb = l2norm(median_emb)
             sim_to_median = float(np.dot(embedding, median_emb))
-            if sim_to_median < outlier_rejection_cos:
-                # Discard outlier (likely background bleed or adjacent person)
-                return False
+            if sim_to_median < 0.45:
+                # ID Switch detected! The tracker reused an ID for a completely different person.
+                self.reset_identity()
 
         sample = TrackletSample(
             embedding=embedding,
@@ -89,6 +108,29 @@ class Tracklet:
             self.best_avatar_quality = quality_score
 
         return True
+
+    def note_match(self, gid: str, score: float, threshold: float, lock_frames: int) -> bool:
+        """
+        Accumulate consecutive hits against the same GID.
+        Returns True only on the frame the track locks CONFIRMED.
+        """
+        if score < threshold:
+            self.consecutive_passes = 0
+            self.candidate_gid = None
+            self.status = "UNKNOWN"
+            return False
+        if self.candidate_gid == gid:
+            self.consecutive_passes += 1
+        else:
+            self.candidate_gid = gid
+            self.consecutive_passes = 1
+        self.similarity_score = score
+        self.status = "TENTATIVE"
+        if self.consecutive_passes >= lock_frames:
+            self.assigned_gid = gid
+            self.status = "CONFIRMED"
+            return True
+        return False
 
     def get_prototype_embedding(self) -> Optional[np.ndarray]:
         """Returns the mean L2-normalized embedding across accumulated samples."""
@@ -118,14 +160,18 @@ class TrackletManager:
             self.tracklets[key] = Tracklet(cam_id, track_id, max_buffer=self.max_buffer_len)
         return self.tracklets[key]
 
-    def prune_dead_tracks(self, current_ts: float):
+    def prune_dead_tracks(self, current_ts: float) -> List[Tuple[str, int]]:
         """Removes tracklets that haven't been updated within lost_timeout_sec."""
         dead_keys = [
             k for k, trk in self.tracklets.items()
-            if (current_ts - trk.last_seen_ts) > self.lost_timeout_sec
+            if trk.last_seen_ts > 0.0 and (current_ts - trk.last_seen_ts) > self.lost_timeout_sec
         ]
         for k in dead_keys:
             self.tracklets.pop(k, None)
+        return dead_keys
+
+    def reset(self):
+        self.tracklets.clear()
 
     def get_active_tracks_for_camera(self, cam_id: str) -> List[Tracklet]:
         return [trk for (cid, _), trk in self.tracklets.items() if cid == cam_id]

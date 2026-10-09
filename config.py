@@ -13,6 +13,24 @@ from typing import Dict, Any
 
 # Base Directories
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE lines from .env. Existing environment variables win."""
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(PROJECT_ROOT / ".env")
 WEIGHTS_DIR = PROJECT_ROOT / "weights"
 WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
@@ -50,15 +68,12 @@ IMAGENET_MEAN_BGR = (103, 116, 124)
 # Optional local fallback video files for offline simulation/testing
 FALLBACK_VIDEOS: Dict[str, str] = {}
 
-# Sensitive URLs are sourced from environment variables if present:
+# RTSP URLs come from environment variables only — do not hardcode credentials.
 DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
     "office_balcony": {
         "id": "office_balcony",
         "name": "Balcony (Enrollment)",
-        "rtsp": os.getenv(
-            "RTSP_URL_OFFICE_BALCONY",
-            "rtsp://admin:Cctv%401234@122.176.35.187:2554/cam/realmonitor?channel=01&subtype=0",
-        ),
+        "rtsp": os.getenv("RTSP_URL_OFFICE_BALCONY", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_balcony"),
         "is_enrollment": True,
         "enabled": True,
@@ -66,59 +81,49 @@ DEFAULT_CAMERAS: Dict[str, Dict[str, Any]] = {
     "office_1": {
         "id": "office_1",
         "name": "Office Cam 01",
-        "rtsp": os.getenv(
-            "RTSP_URL_OFFICE_1",
-            "rtsp://admin:aniket12@122.176.35.187:5554/Streaming/Channels/101",
-        ),
+        "rtsp": os.getenv("RTSP_URL_OFFICE_1", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_1"),
         "is_enrollment": False,
-        "enabled": True,
+        "enabled": False,
     },
     "office_2": {
         "id": "office_2",
         "name": "Office Cam 02",
-        "rtsp": os.getenv(
-            "RTSP_URL_OFFICE_2",
-            "rtsp://admin:Cctv%401234@122.176.35.187:2554/cam/realmonitor?channel=02&subtype=0",
-        ),
+        "rtsp": os.getenv("RTSP_URL_OFFICE_2", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_2"),
         "is_enrollment": False,
-        "enabled": True,
+        "enabled": False,
     },
     "office_3": {
         "id": "office_3",
         "name": "Office Cam 03",
-        "rtsp": os.getenv(
-            "RTSP_URL_OFFICE_3",
-            "rtsp://admin:Cctv%401234@122.176.35.187:2554/cam/realmonitor?channel=03&subtype=0",
-        ),
+        "rtsp": os.getenv("RTSP_URL_OFFICE_3", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_3"),
         "is_enrollment": False,
-        "enabled": True,
+        "enabled": False,
     },
     "office_4": {
         "id": "office_4",
         "name": "Office Cam 04",
-        "rtsp": os.getenv(
-            "RTSP_URL_OFFICE_4",
-            "rtsp://admin:Admin%40123@122.176.35.187:554/cam/realmonitor?channel=3&subtype=0",
-        ),
+        "rtsp": os.getenv("RTSP_URL_OFFICE_4", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_4"),
         "is_enrollment": False,
-        "enabled": True,
+        "enabled": False,
     },
     "office_5": {
         "id": "office_5",
         "name": "Office Cam 05",
-        "rtsp": os.getenv(
-            "RTSP_URL_OFFICE_5",
-            "rtsp://admin:Admin%40123@122.176.35.187:554/cam/realmonitor?channel=6&subtype=0",
-        ),
+        "rtsp": os.getenv("RTSP_URL_OFFICE_5", ""),
         "fallback_video": FALLBACK_VIDEOS.get("office_5"),
         "is_enrollment": False,
-        "enabled": True,
+        "enabled": False,
     },
 }
+
+
+def is_enrollment_camera(cam_id: str) -> bool:
+    cam = DEFAULT_CAMERAS.get(cam_id) or {}
+    return bool(cam.get("is_enrollment"))
 
 # -----------------------------------------------------------------------------
 # Ingestion & Video Pacing
@@ -144,18 +149,24 @@ QG_TEMPORAL_SPACING_SEC = 0.40   # Minimum time gap between accepted crops for t
 QG_MIN_GATE_PASSES = 3           # Minimum gate-passing crops required before identity decision
 
 # -----------------------------------------------------------------------------
-# Identity Layer: Matching, Merging & Cannot-Links
+# Tracker-First & State Machine Config
 # -----------------------------------------------------------------------------
-MATCH_SIM_THRESHOLD = 0.70       # Cosine similarity threshold for global identity matching
-MATCH_MARGIN = 0.05              # Minimum margin over 2nd best candidate to confirm match
-STICKY_HYSTERESIS_BOOST = 0.08   # Bonus similarity to keep current confirmed identity
-STICKY_RELEASE_COUNT = 15        # Consecutive low scores before releasing confirmed track
+TRACKER_TYPE = 'bytetrack'       # Options: 'bytetrack', 'pbf' (Particle Based Filtering)
+REID_CHECK_INTERVAL_SEC = 2.0    # Wait time between Re-ID checks for UNKNOWN IDs
+CONSECUTIVE_LOCK_FRAMES = 3      # Consecutive passes required to transition TENTATIVE -> LOCKED
+MATCH_SIM_THRESHOLD = 0.65       # Cosine similarity threshold for global identity matching
+MAX_EXEMPLARS_PER_ID = 5         # Maximum diverse appearance exemplars stored per Global ID
 
-MERGE_SIM_THRESHOLD = 0.75       # Strict cosine similarity for dynamic auto-merging (higher than match)
-RECONCILIATION_INTERVAL_SEC = 1.2 # Periodic interval for cross-camera reconciliation worker
-CANNOT_LINK_TIME_TOLERANCE_SEC = 0.35 # Temporal tolerance for same-camera co-occurrence
-MAX_EXEMPLARS_PER_ID = 10        # Maximum diverse appearance exemplars stored per Global ID
-EMA_CENTROID_ALPHA = 0.15        # Centroid update momentum
+# Matching only. Identities are enrolled on the balcony and assigned on other cameras.
+MATCH_MARGIN = 0.05              # Best match must beat the runner-up by this much
+STICKY_HYSTERESIS_BOOST = 0.08   # Bonus so a track keeps its current identity
+EMA_CENTROID_ALPHA = 0.15        # How fast an identity centroid follows new embeddings
+
+# -----------------------------------------------------------------------------
+# Balcony Enroller Config
+# -----------------------------------------------------------------------------
+TRIPWIRE_Y_PCT = 0.5             # Percentage of screen height (0.0 to 1.0) for tripwire line. Updatable from UI.
+ENROLLMENT_FRAMES = 5            # Number of frames to capture when tripwire is crossed
 
 # -----------------------------------------------------------------------------
 # Visual Palettes & Dashboard
@@ -176,5 +187,7 @@ COLOR_TENTATIVE = (0, 200, 255)   # Amber badge for buffering/tentative tracks
 COLOR_UNKNOWN = (150, 150, 150)   # Neutral gray
 
 # Web Server Settings
-WEB_HOST = "0.0.0.0"
+WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("PORT", "8000"))
+# Optional shared secret for mutating dashboard APIs. When empty, routes stay open (local use).
+API_TOKEN = os.getenv("API_TOKEN", "")

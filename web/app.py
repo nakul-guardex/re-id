@@ -8,15 +8,18 @@ live gallery person cards, event logs, and reversible merge rollback.
 """
 
 from pathlib import Path
+import secrets
 import time
 from flask import Flask, Response, jsonify, render_template, request
 
 from ..config import (
+    API_TOKEN,
     DEFAULT_CAMERAS,
+    EMA_CENTROID_ALPHA,
     LOGS_DIR,
     MATCH_MARGIN,
     MATCH_SIM_THRESHOLD,
-    MERGE_SIM_THRESHOLD,
+    MAX_EXEMPLARS_PER_ID,
     PALETTE,
     REID_CHECKPOINT_PATH,
     STICKY_HYSTERESIS_BOOST,
@@ -56,9 +59,13 @@ identity_mgr = GlobalIdentityManager(
     palette=PALETTE,
     match_threshold=MATCH_SIM_THRESHOLD,
     match_margin=MATCH_MARGIN,
-    merge_threshold=MERGE_SIM_THRESHOLD,
     sticky_boost=STICKY_HYSTERESIS_BOOST,
+    max_exemplars=MAX_EXEMPLARS_PER_ID,
+    ema_alpha=EMA_CENTROID_ALPHA,
 )
+
+# Same-origin cookie. Cross-site POSTs do not include it (SameSite=Lax).
+_CSRF_TOKEN = API_TOKEN or secrets.token_hex(16)
 
 tracker_engine = MultiCameraTrackerEngine(model_path=YOLO_MODEL_PATH)
 reid_extractor = ResNet50IBN_WithBNNeck(checkpoint_path=REID_CHECKPOINT_PATH)
@@ -76,7 +83,29 @@ coordinator = MultiCameraCoordinator(
 )
 
 print("[Server] Core models & pipeline initialized in IDLE state.")
+if not API_TOKEN:
+    print("[Server] API_TOKEN is unset. Mutating routes require the dashboard session cookie.")
 print("=" * 70 + "\n")
+
+
+@app.before_request
+def _require_csrf_on_post():
+    if request.method != "POST":
+        return None
+    if request.cookies.get("omni_csrf") != _CSRF_TOKEN:
+        return jsonify({"error": "missing or invalid session cookie"}), 401
+    return None
+
+
+@app.after_request
+def _set_csrf_cookie(response):
+    response.set_cookie(
+        "omni_csrf",
+        _CSRF_TOKEN,
+        httponly=True,
+        samesite="Lax",
+    )
+    return response
 
 
 # -----------------------------------------------------------------------------
@@ -105,7 +134,8 @@ def get_status():
 def probe_cameras():
     """Runs parallel test probe on all configured camera streams."""
     try:
-        res = session_mgr.probe_cameras()
+        data = request.get_json(silent=True) or {}
+        res = session_mgr.probe_cameras(camera_ids=data.get("cameras"))
         return jsonify(res)
     except Exception as ex:
         return jsonify({"error": str(ex)}), 400
@@ -143,22 +173,8 @@ def get_gallery():
 
 @app.route("/api/events", methods=["GET"])
 def get_events():
-    """Returns live audit and merge event log."""
+    """Returns the live enrollment and match event log."""
     return jsonify({"events": list(reversed(identity_mgr.event_log))})
-
-
-@app.route("/api/undo_merge", methods=["POST"])
-def undo_merge():
-    """Reverts a previously executed identity merge."""
-    data = request.get_json(silent=True) or {}
-    merge_id = data.get("merge_id")
-    if not merge_id:
-        return jsonify({"error": "merge_id required"}), 400
-
-    ok = identity_mgr.undo_merge(merge_id)
-    if ok:
-        return jsonify({"success": True, "message": f"Successfully reverted merge {merge_id}"})
-    return jsonify({"error": "Merge event not found or already undone"}), 404
 
 
 @app.route("/api/camera/update", methods=["POST"])
@@ -172,6 +188,23 @@ def update_camera():
 
     ok = session_mgr.update_camera_config(cam_id, rtsp_url)
     return jsonify({"success": ok})
+
+
+@app.route("/api/tripwire", methods=["POST"])
+def update_tripwire():
+    """Updates the Tripwire Y Percentage."""
+    data = request.get_json(silent=True) or {}
+    y_pct = data.get("y_pct")
+    if y_pct is None:
+        return jsonify({"error": "y_pct required"}), 400
+    try:
+        pct = float(y_pct)
+    except (TypeError, ValueError):
+        return jsonify({"error": "y_pct must be a number"}), 400
+    pct = min(100.0, max(0.0, pct))
+    import multi_rtsp_reid.config as cfg
+    cfg.TRIPWIRE_Y_PCT = pct / 100.0
+    return jsonify({"success": True, "y_pct": cfg.TRIPWIRE_Y_PCT})
 
 
 # -----------------------------------------------------------------------------

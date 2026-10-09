@@ -28,8 +28,11 @@ from multi_rtsp_reid.web.app import app
 def main():
     print("\n" + "=" * 75)
     print("  🚀 OMNIREID: 6-CAMERA LIVE PERSON RE-ID & FUSION SYSTEM (v2)")
-    print(f"  Web Dashboard: http://localhost:{WEB_PORT} (Host: {WEB_HOST})")
-    print("  State: IDLE (Analysis starts via Web Dashboard: Test -> Start)")
+    print(f"  Web Dashboard (Local): http://localhost:{WEB_PORT} (Host: {WEB_HOST})")
+    
+
+
+    print("  State: SETUP MODE (Draw Tripwire on Balcony -> Start System)")
     print("=" * 75 + "\n")
 
     app.run(host=WEB_HOST, port=WEB_PORT, debug=False, threaded=True)

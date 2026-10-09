@@ -98,6 +98,8 @@ class StreamWorker:
         with self.lock:
             if self.running:
                 return
+            if self.thread and self.thread.is_alive():
+                return
             self.running = True
             self.joined_late = is_hot_join
             self.status = StreamStatus.HOT_JOINED if is_hot_join else StreamStatus.CONNECTING
@@ -132,11 +134,13 @@ class StreamWorker:
         t_start = time.monotonic()
         frames_received = 0
         w, h = 0, 0
+        last_frame = None
 
         while (time.monotonic() - t_start) < timeout_sec:
             ret, frame = cap.read()
             if ret and frame is not None:
                 frames_received += 1
+                last_frame = frame
                 if w == 0:
                     h, w = frame.shape[:2]
                 if frames_received >= min_frames:
@@ -145,6 +149,12 @@ class StreamWorker:
                 time.sleep(0.05)
 
         cap.release()
+        if last_frame is not None:
+            with self.lock:
+                self.latest_raw_frame = last_frame
+                self.latest_capture_ts = time.monotonic()
+                self.width = last_frame.shape[1]
+                self.height = last_frame.shape[0]
         elapsed = time.monotonic() - t_start
 
         if frames_received < min_frames:
@@ -247,27 +257,33 @@ class StreamWorker:
             return self.latest_raw_frame.copy(), self.latest_capture_ts, self.fps, self.status
 
     def set_annotated_frame(self, frame: np.ndarray):
-        """Stores the processed AI frame to a local mp4 video file instead of streaming."""
+        """Stores the processed AI frame for the live web feed."""
         if frame is None:
             return
         
-        if self.video_writer is None:
-            h, w = frame.shape[:2]
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            ts = int(time.time())
-            filename = f"annotated_{self.cam_id}_{ts}.mp4"
-            # AI processes at exactly 5 FPS.
-            fps = 5.0 
-            self.video_writer = cv2.VideoWriter(filename, fourcc, fps, (w, h))
-        
-        self.video_writer.write(frame)
-
         with self.lock:
             self.latest_annotated_frame = frame
 
     def get_jpeg(self) -> bytes:
         """Returns the latest JPEG bytes for MJPEG web feed."""
-        return self._placeholder_jpeg
+        with self.lock:
+            frame = self.latest_annotated_frame if self.latest_annotated_frame is not None else self.latest_raw_frame
+            if frame is None:
+                return self._placeholder_jpeg
+
+            frame_copy = frame.copy()
+
+            # Draw the Tripwire exactly where the slider sets it
+            if self.cam_id == "office_balcony":
+                import multi_rtsp_reid.config as cfg
+                y_pct = getattr(cfg, 'TRIPWIRE_Y_PCT', 0.5)
+                y_line = int(frame_copy.shape[0] * y_pct)
+                cv2.line(frame_copy, (0, y_line), (frame_copy.shape[1], y_line), (0, 0, 255), 2)
+
+            success, buf = cv2.imencode('.jpg', frame_copy, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if success:
+                return buf.tobytes()
+            return self._placeholder_jpeg
 
     def get_health_metrics(self) -> Dict[str, Any]:
         """Returns status dictionary for dashboard health monitor."""

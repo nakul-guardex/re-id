@@ -19,6 +19,8 @@ import yaml
 from ultralytics import YOLO
 from ultralytics.trackers.byte_tracker import BYTETracker
 
+from ..config import TRACKER_TYPE
+
 
 @dataclass
 class TrackedDetection:
@@ -52,8 +54,14 @@ def get_default_tracker_config() -> SimpleNamespace:
 class CameraTracker:
     """Individual tracker instance dedicated to a single camera stream."""
 
-    def __init__(self, cam_id: str, tracker_type: str = "bytetrack"):
+    def __init__(self, cam_id: str, tracker_type: str = TRACKER_TYPE):
         self.cam_id = cam_id
+        if tracker_type != "bytetrack":
+            print(
+                f"[Tracker] TRACKER_TYPE={tracker_type!r} is not implemented; using bytetrack.",
+                flush=True,
+            )
+            tracker_type = "bytetrack"
         self.tracker_type = tracker_type
         self.cfg = get_default_tracker_config()
         self.byte_tracker = BYTETracker(self.cfg)
@@ -70,12 +78,13 @@ class CameraTracker:
         """
         Updates camera tracker with YOLO detections and matches masks.
         """
-        if yolo_result is None or yolo_result.boxes is None or len(yolo_result.boxes) == 0:
+        if yolo_result is None or yolo_result.boxes is None:
             return []
 
         h_frame, w_frame = frame_shape[:2]
         boxes_cpu = yolo_result.boxes.cpu().numpy()
         try:
+            # Empty frames still advance ByteTrack so lost IDs age out.
             tracked_out = self.byte_tracker.update(boxes_cpu)
         except Exception as e:
             print(f"[Tracker] Error running BYTETracker.update for {self.cam_id}: {e}", flush=True)
@@ -140,6 +149,11 @@ class MultiCameraTrackerEngine:
     def reset_camera_tracker(self, cam_id: str):
         if cam_id in self.trackers:
             self.trackers[cam_id].reset()
+
+    def reset_all(self):
+        for tracker in self.trackers.values():
+            tracker.reset()
+        self.trackers.clear()
 
     def detect_batch(self, frames: List[np.ndarray], conf: float = 0.35) -> List[Any]:
         """

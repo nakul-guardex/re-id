@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Callable, Dict, List, Optional, Any
 
+from ..config import INGESTION_DOWNSCALE_WIDTH, RECORDINGS_DIR
 from .stream_worker import StreamWorker, StreamStatus
 
 
@@ -51,6 +52,7 @@ class SessionManager:
         # Workers registry
         self.workers: Dict[str, StreamWorker] = {}
         self.probe_results: Dict[str, Dict[str, Any]] = {}
+        self.recordings_dir = RECORDINGS_DIR
 
         # Instantiate stream workers (in stopped/offline state initially)
         for cam_id, cfg in self.cameras_config.items():
@@ -59,9 +61,10 @@ class SessionManager:
                 name=cfg["name"],
                 rtsp_url=cfg.get("rtsp", ""),
                 fallback_video=cfg.get("fallback_video"),
+                downscale_width=INGESTION_DOWNSCALE_WIDTH,
             )
 
-    def probe_cameras(self, timeout_sec: float = 6.0, min_frames: int = 15) -> Dict[str, Any]:
+    def probe_cameras(self, timeout_sec: float = 6.0, min_frames: int = 15, camera_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Transitions to PROBING, tests all configured streams in parallel,
         and transitions to READY upon completion.
@@ -86,8 +89,19 @@ class SessionManager:
                     "resolution": f"{w}x{h}" if w > 0 else "N/A",
                 }
 
+        selected = set(camera_ids) if camera_ids else None
         for cid, worker in self.workers.items():
             cfg = self.cameras_config.get(cid, {})
+            if selected is not None and cid not in selected:
+                with res_lock:
+                    results[cid] = {
+                        "ok": True,
+                        "message": "Not selected",
+                        "fps": 0.0,
+                        "resolution": "N/A",
+                        "standby": True,
+                    }
+                continue
             if not cfg.get("enabled", True) or not (cfg.get("rtsp") or cfg.get("fallback_video")):
                 with res_lock:
                     results[cid] = {
@@ -110,7 +124,9 @@ class SessionManager:
             self.state = SessionState.READY
             active_configured = [
                 cid for cid, cfg in self.cameras_config.items()
-                if cfg.get("enabled", True) and (cfg.get("rtsp") or cfg.get("fallback_video"))
+                if (selected is None or cid in selected)
+                and cfg.get("enabled", True)
+                and (cfg.get("rtsp") or cfg.get("fallback_video"))
             ]
             passing_count = sum(1 for cid in active_configured if results.get(cid, {}).get("ok"))
             total_active = len(active_configured) if active_configured else len(self.workers)
@@ -180,9 +196,8 @@ class SessionManager:
             if worker.thread and worker.thread.is_alive():
                 remaining = max(0.0, deadline - time.monotonic())
                 worker.thread.join(timeout=remaining)
-            worker.thread = None
-            
-            # Finalize the MP4 file by releasing the writer (writes the moov atom)
+            if worker.thread and not worker.thread.is_alive():
+                worker.thread = None
             if worker.video_writer is not None:
                 worker.video_writer.release()
                 worker.video_writer = None

@@ -5,7 +5,7 @@ import numpy as np
 
 from config import (
     COLOR_TENTATIVE, COLOR_UNKNOWN, IMAGENET_MEAN_BGR, PALETTE,
-    MATCH_SIM_THRESHOLD, MATCH_MARGIN, MERGE_SIM_THRESHOLD, STICKY_HYSTERESIS_BOOST,
+    MATCH_SIM_THRESHOLD, MATCH_MARGIN, STICKY_HYSTERESIS_BOOST,
     REID_CHECKPOINT_PATH, YOLO_MODEL_PATH
 )
 from core.tracker_engine import MultiCameraTrackerEngine
@@ -83,7 +83,7 @@ def run_fast_experiment():
         
     identity_mgr = GlobalIdentityManager(
         palette=PALETTE, match_threshold=MATCH_SIM_THRESHOLD,
-        match_margin=MATCH_MARGIN, merge_threshold=MERGE_SIM_THRESHOLD,
+        match_margin=MATCH_MARGIN,
         sticky_boost=STICKY_HYSTERESIS_BOOST
     )
     
@@ -181,16 +181,15 @@ def run_fast_experiment():
             frame = frames[cid]
             dets = cam_detections.get(cid, [])
             tracks_for_matching = []
-            frame_assigned_gids = []
-            
+            occupied_gids = set()
+
             for det in dets:
                 tracklet = tracklet_mgr.get_or_create(cid, det.track_id)
                 if tracklet.status == "CONFIRMED":
                     if tracklet.assigned_gid:
                         gid = identity_mgr.resolve_gid(tracklet.assigned_gid)
-                        frame_assigned_gids.append(gid)
-                        if gid in identity_mgr.identities:
-                            identity_mgr.identities[gid].active_presence[cid] = (det.track_id, cap_ts)
+                        occupied_gids.add(gid)
+                        identity_mgr.update_presence(gid, cid, det.track_id, cap_ts)
                     continue
                 if tracklet.sample_count >= 3:
                     proto = tracklet.get_prototype_embedding()
@@ -198,21 +197,21 @@ def run_fast_experiment():
                         tracks_for_matching.append((det.track_id, proto, det.box, tracklet.assigned_gid))
                         
             if tracks_for_matching:
-                assignments = identity_mgr.match_camera_tracks(cid, tracks_for_matching, cap_ts)
+                assignments = identity_mgr.match_camera_tracks(
+                    cid,
+                    tracks_for_matching,
+                    cap_ts,
+                    occupied_gids=occupied_gids,
+                    is_enrollment_cam=True,
+                    commit_exemplars=True,
+                )
                 for tid, (gid, score) in assignments.items():
                     tracklet = tracklet_mgr.get_or_create(cid, tid)
                     resolved_gid = identity_mgr.resolve_gid(gid)
                     tracklet.assigned_gid = resolved_gid
                     tracklet.similarity_score = score
                     tracklet.status = "CONFIRMED"
-                    frame_assigned_gids.append(resolved_gid)
-                    
-            if len(frame_assigned_gids) >= 2:
-                identity_mgr.record_co_occurrence(cid, frame_assigned_gids)
-                
-            if frame_idx % 30 == 0:
-                identity_mgr.run_reconciliation_cycle()
-                
+
             annotated = frame.copy()
             mask_overlay = annotated.copy()
             for det in dets:

@@ -18,6 +18,21 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from ..config import (
+    QG_BLUR_LAPLACIAN_VAR,
+    QG_BORDER_MARGIN,
+    QG_DET_CONFIDENCE,
+    QG_MASK_SOLIDITY_MAX,
+    QG_MASK_SOLIDITY_MIN,
+    QG_MAX_OCCLUSION_IOU,
+    QG_MIN_GATE_PASSES,
+    QG_MIN_HEIGHT,
+    QG_MIN_WIDTH,
+    QG_TEMPORAL_SPACING_SEC,
+    TRIPWIRE_Y_PCT,
+    is_enrollment_camera,
+)
+
 
 @dataclass
 class GateEvaluationResult:
@@ -55,15 +70,15 @@ class ClearFrameQualityGate:
 
     def __init__(
         self,
-        min_height: int = 90,
-        min_width: int = 45,
-        border_margin: int = 15,
-        solidity_range: Tuple[float, float] = (0.20, 0.85),
-        min_confidence: float = 0.45,
-        min_blur_score: float = 35.0,
-        max_occlusion_iou: float = 0.35,
-        temporal_spacing_sec: float = 0.40,
-        min_gate_passes: int = 3,
+        min_height: int = QG_MIN_HEIGHT,
+        min_width: int = QG_MIN_WIDTH,
+        border_margin: int = QG_BORDER_MARGIN,
+        solidity_range: Tuple[float, float] = (QG_MASK_SOLIDITY_MIN, QG_MASK_SOLIDITY_MAX),
+        min_confidence: float = QG_DET_CONFIDENCE,
+        min_blur_score: float = QG_BLUR_LAPLACIAN_VAR,
+        max_occlusion_iou: float = QG_MAX_OCCLUSION_IOU,
+        temporal_spacing_sec: float = QG_TEMPORAL_SPACING_SEC,
+        min_gate_passes: int = QG_MIN_GATE_PASSES,
     ):
         self.min_height = min_height
         self.min_width = min_width
@@ -77,10 +92,16 @@ class ClearFrameQualityGate:
 
         # Track temporal history: (cam_id, track_id) -> last_accepted_capture_ts
         self._last_accepted_ts: Dict[Tuple[str, int], float] = {}
+        self._tripwire_latched: Dict[Tuple[str, int], bool] = {}
 
     def reset_track(self, cam_id: str, track_id: int):
         """Clears state when a track terminates."""
         self._last_accepted_ts.pop((cam_id, track_id), None)
+        self._tripwire_latched.pop((cam_id, track_id), None)
+
+    def reset(self):
+        self._last_accepted_ts.clear()
+        self._tripwire_latched.clear()
 
     def evaluate(
         self,
@@ -109,12 +130,16 @@ class ClearFrameQualityGate:
         if w < self.min_width:
             reasons.append(f"Width too small ({w}px < {self.min_width}px)")
 
+        enrollment = is_enrollment_camera(cam_id)
+
         # 2. Border Proximity Margin (reject cut-off bodies entering/exiting frame)
+        # Enrollment camera: allow touching the bottom edge (feet hit it early).
+        bottom_margin = 0 if enrollment else self.border_margin
         if (
             x1 < self.border_margin
             or y1 < self.border_margin
             or x2 > (w_frame - self.border_margin)
-            or y2 > (h_frame - self.border_margin)
+            or y2 > (h_frame - bottom_margin)
         ):
             reasons.append("Cut off at image boundary")
 
@@ -158,11 +183,26 @@ class ClearFrameQualityGate:
                 if blur_score < self.min_blur_score:
                     reasons.append(f"Motion blur detected (Var {blur_score:.1f} < {self.min_blur_score})")
 
-        # 7. Temporal Spacing Check
+        # 7. Temporal Spacing Check (Fast capture for enrollment camera)
         last_ts = self._last_accepted_ts.get((cam_id, track_id), 0.0)
         time_delta = capture_ts - last_ts
-        if time_delta < self.temporal_spacing_sec and last_ts > 0.0:
-            reasons.append(f"Temporal spacing too small ({time_delta:.2f}s < {self.temporal_spacing_sec}s)")
+        spacing_needed = 0.05 if enrollment else self.temporal_spacing_sec
+        if time_delta < spacing_needed and last_ts > 0.0:
+            reasons.append(f"Temporal spacing too small ({time_delta:.2f}s < {spacing_needed}s)")
+
+        # 8. Tripwire: latch on first crossing, then allow remaining enrollment samples
+        if enrollment:
+            import multi_rtsp_reid.config as cfg
+            y_line = int(h_frame * getattr(cfg, "TRIPWIRE_Y_PCT", TRIPWIRE_Y_PCT))
+            key = (cam_id, track_id)
+            touches_segment = False
+            if y1 <= y_line <= y2 and mask_bool is not None:
+                if 0 <= y_line < mask_bool.shape[0]:
+                    touches_segment = bool(np.any(mask_bool[y_line, :]))
+            if touches_segment:
+                self._tripwire_latched[key] = True
+            elif not self._tripwire_latched.get(key, False):
+                reasons.append(f"Person's segment not touching tripwire (line: {y_line})")
 
         passed = len(reasons) == 0
 

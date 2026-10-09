@@ -165,11 +165,6 @@ function renderEvents(events) {
 
   container.innerHTML = events.slice(0, 30).map(evt => {
     const typeClass = evt.type.toLowerCase();
-    let undoBtn = "";
-    if (evt.type === "MERGE" && evt.details && evt.details.event_id) {
-      undoBtn = `<button class="btn-undo" onclick="undoMerge('${evt.details.event_id}')">↩ Undo Merge</button>`;
-    }
-
     return `
       <div class="event-card ${typeClass}">
         <div class="event-header">
@@ -177,7 +172,6 @@ function renderEvents(events) {
           <span class="event-time">${evt.timestamp.toFixed(1)}s</span>
         </div>
         <div class="event-msg">${evt.message}</div>
-        ${undoBtn}
       </div>
     `;
   }).join("");
@@ -218,7 +212,7 @@ async function probeCameras() {
       }
     }
 
-    alert(`Camera Probe Finished!\nPassing Feeds: ${data.passing_cameras}\n\nAll active feeds tested healthy. Click "Start Analysis" to begin real-time tracking!`);
+    alert(`Camera probe finished: ${data.passing_cameras}.\nClick Start Analysis to run every camera that passed.`);
   } catch (err) {
     alert("Error probing cameras: " + err);
   } finally {
@@ -261,27 +255,6 @@ async function stopAnalysis() {
   }
 }
 
-async function undoMerge(mergeId) {
-  if (!confirm("Are you sure you want to undo this identity merge?")) return;
-  try {
-    const res = await fetch("/api/undo_merge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ merge_id: mergeId }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      alert(data.message);
-      pollGallery();
-      pollEvents();
-    } else {
-      alert("Undo failed: " + data.error);
-    }
-  } catch (err) {
-    alert("Error reverting merge: " + err);
-  }
-}
-
 // -----------------------------------------------------------------------------
 // RTSP Modal Configuration
 // -----------------------------------------------------------------------------
@@ -291,6 +264,27 @@ function openConfigModal() {
 
 function closeConfigModal() {
   document.getElementById("configModal").style.display = "none";
+}
+
+async function updateTripwire(val) {
+  try {
+    await fetch("/api/tripwire", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ y_pct: val }),
+    });
+    if (currentState !== "RUNNING") {
+      const img = document.getElementById("stream_office_balcony");
+      const ph = document.getElementById("placeholder_office_balcony");
+      if (img) {
+        img.src = `/snapshot/office_balcony?t=${Date.now()}`;
+        if (ph) ph.classList.add("hidden");
+      }
+    }
+  } catch (err) {
+    console.error("Tripwire update failed:", err);
+  }
 }
 
 async function saveCameraUrl(camId) {

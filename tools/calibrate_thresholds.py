@@ -5,8 +5,7 @@ Threshold Calibration & Similarity Distribution Analyzer
 Reads recorded session JSONL logs, analyzes cosine similarity distributions
 between same-identity samples vs distinct-identity samples, and calculates
 optimal data-driven thresholds for:
-  - MATCH_SIM_THRESHOLD (single-frame/cross-camera promotion)
-  - MERGE_SIM_THRESHOLD (high-precision online reconciliation)
+  - MATCH_SIM_THRESHOLD (cross-camera assignment)
 """
 
 import argparse
@@ -73,11 +72,9 @@ def analyze_log(log_path: Path):
 
     if same_sims and diff_sims:
         suggested_match = float(np.percentile(same_sims, 15))
-        suggested_merge = max(suggested_match + 0.05, float(np.percentile(diff_sims, 98)))
         print("-" * 60)
         print("  RECOMMENDED DATA-DRIVEN THRESHOLDS:")
         print(f"  MATCH_SIM_THRESHOLD: {suggested_match:.3f}")
-        print(f"  MERGE_SIM_THRESHOLD: {suggested_merge:.3f}")
     print("=" * 60 + "\n")
 
 

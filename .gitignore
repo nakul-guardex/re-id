@@ -10,7 +10,9 @@ __pycache__/
 *.onnx
 *.weights
 weights/
-models/
+# Keep Re-ID Python source. Weight files are ignored by the patterns above.
+models/*
+!models/*.py
 
 # Videos
 *.mp4
